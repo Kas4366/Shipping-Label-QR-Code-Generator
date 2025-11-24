@@ -18,6 +18,7 @@ export const detectQRCode = async (page: pdfjsLib.PDFPageProxy): Promise<boolean
     await page.render({
       canvasContext: context,
       viewport: viewport,
+      canvas: canvas,
     }).promise;
 
     const imageData = context.getImageData(0, 0, canvas.width, canvas.height);

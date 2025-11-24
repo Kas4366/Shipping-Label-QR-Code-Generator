@@ -1,10 +1,14 @@
 export interface PackingSlip {
   pageNumber: number;
   orderNumber: string;
+  customerName: string | null;
+  postcode: string | null;
 }
 
 export interface ShippingLabel {
   pageNumber: number;
+  customerName: string | null;
+  postcode: string | null;
 }
 
 export interface PackingSlipGroup {
@@ -29,6 +33,8 @@ export interface ProcessingStatus {
 export interface OrphanedPackingSlip {
   pageNumber: number;
   orderNumber: string;
+  customerName: string | null;
+  postcode: string | null;
 }
 
 export interface AnalysisResult {
