@@ -11,10 +11,20 @@ export interface ShippingLabel {
   postcode: string | null;
 }
 
+export interface LabelCandidate {
+  label: ShippingLabel;
+  score: number;
+  matchReasons: string[];
+}
+
+export type MatchConfidence = 'high' | 'medium' | 'low' | 'unmatched';
+
 export interface PackingSlipGroup {
   orderNumber: string;
   packingSlips: PackingSlip[];
   shippingLabel: ShippingLabel | null;
+  matchConfidence?: MatchConfidence;
+  labelCandidates?: LabelCandidate[];
 }
 
 export interface ProcessedOrder {
@@ -37,9 +47,15 @@ export interface OrphanedPackingSlip {
   postcode: string | null;
 }
 
+export interface UncertainMatch {
+  group: PackingSlipGroup;
+  candidates: LabelCandidate[];
+}
+
 export interface AnalysisResult {
   groups: PackingSlipGroup[];
   orphanedSlips: OrphanedPackingSlip[];
+  uncertainMatches: UncertainMatch[];
   totalPackingSlipsDetected: number;
   totalShippingLabelsDetected: number;
 }

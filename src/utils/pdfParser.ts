@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import { PackingSlip, ShippingLabel, PackingSlipGroup, ProcessedOrder, AnalysisResult } from '../types';
+import { PackingSlip, ShippingLabel, PackingSlipGroup, ProcessedOrder, AnalysisResult, LabelCandidate, MatchConfidence } from '../types';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
@@ -288,9 +288,22 @@ export const analyzePDF = async (
         postcode: slip.postcode,
       })));
 
+    const uncertainMatches = groups
+      .filter(group =>
+        group.shippingLabel !== null &&
+        (group.matchConfidence === 'low' || group.matchConfidence === 'medium')
+      )
+      .map(group => ({
+        group,
+        candidates: group.labelCandidates || [],
+      }));
+
+    console.log(`Found ${uncertainMatches.length} uncertain matches that may need review`);
+
     return {
       groups,
       orphanedSlips,
+      uncertainMatches,
       totalPackingSlipsDetected,
       totalShippingLabelsDetected
     };
@@ -298,6 +311,85 @@ export const analyzePDF = async (
     console.error('Error in analyzePDF:', error);
     throw new Error(`Failed to analyze PDF: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
+};
+
+const calculateMatchScore = (
+  slip: PackingSlip,
+  label: ShippingLabel
+): { score: number; reasons: string[] } => {
+  let score = 0;
+  const reasons: string[] = [];
+
+  const slipName = slip.customerName;
+  const labelName = label.customerName;
+  const slipPostcode = slip.postcode;
+  const labelPostcode = label.postcode;
+  const pageDistance = Math.abs(label.pageNumber - slip.pageNumber);
+
+  if (slipName && labelName) {
+    if (slipName === labelName) {
+      score += 100;
+      reasons.push('Exact name match');
+
+      if (slipPostcode && labelPostcode && slipPostcode === labelPostcode) {
+        score += 50;
+        reasons.push('Postcode match');
+      }
+    } else {
+      const nameSimilarity = calculateNameSimilarity(slipName, labelName);
+      if (nameSimilarity > 0.7) {
+        score += 60;
+        reasons.push('Similar name');
+      }
+    }
+  }
+
+  if (slipPostcode && labelPostcode && slipPostcode === labelPostcode && score < 100) {
+    score += 80;
+    reasons.push('Postcode match');
+  }
+
+  if (pageDistance === 1) {
+    score += 30;
+    reasons.push('Adjacent pages');
+  } else if (pageDistance === 2) {
+    score += 20;
+    reasons.push('Near pages (distance 2)');
+  } else if (pageDistance <= 5) {
+    score += 10;
+    reasons.push(`Close pages (distance ${pageDistance})`);
+  }
+
+  if (!labelName) {
+    reasons.push('Label has no name extracted');
+  }
+
+  return { score, reasons };
+};
+
+const calculateNameSimilarity = (name1: string, name2: string): number => {
+  const words1 = name1.toLowerCase().split(/\s+/);
+  const words2 = name2.toLowerCase().split(/\s+/);
+
+  let matchCount = 0;
+  for (const word1 of words1) {
+    for (const word2 of words2) {
+      if (word1 === word2 || word1.includes(word2) || word2.includes(word1)) {
+        matchCount++;
+        break;
+      }
+    }
+  }
+
+  return matchCount / Math.max(words1.length, words2.length);
+};
+
+const getMatchConfidence = (score: number, hasName: boolean, hasPostcode: boolean): MatchConfidence => {
+  if (score >= 150) return 'high';
+  if (score >= 100) return 'high';
+  if (score >= 80) return 'medium';
+  if (score >= 30) return 'low';
+  return 'unmatched';
 };
 
 export const matchPackingSlipsToLabels = (
@@ -330,41 +422,40 @@ export const matchPackingSlipsToLabels = (
   const usedLabelIndices = new Set<number>();
 
   for (const slip of packingSlips) {
-    let bestMatchIndex = -1;
-    let bestMatchScore = 0;
+    const candidates: LabelCandidate[] = [];
 
     for (let i = 0; i < shippingLabels.length; i++) {
       if (usedLabelIndices.has(i)) continue;
 
       const label = shippingLabels[i];
-      let score = 0;
+      const { score, reasons } = calculateMatchScore(slip, label);
 
-      if (slip.customerName && label.customerName) {
-        if (slip.customerName === label.customerName) {
-          score += 100;
-
-          if (slip.postcode && label.postcode && slip.postcode === label.postcode) {
-            score += 50;
-          }
-        }
-      } else if (!label.customerName) {
-        const pageDistance = Math.abs(label.pageNumber - slip.pageNumber);
-        if (pageDistance === 1) {
-          score += 50;
-        } else if (pageDistance <= 3) {
-          score += 20;
-        }
-      }
-
-      if (score > bestMatchScore) {
-        bestMatchScore = score;
-        bestMatchIndex = i;
+      if (score > 0) {
+        candidates.push({
+          label,
+          score,
+          matchReasons: reasons,
+        });
       }
     }
 
-    if (bestMatchIndex >= 0 && (bestMatchScore >= 100 || bestMatchScore >= 50)) {
-      const matchedLabel = shippingLabels[bestMatchIndex];
-      usedLabelIndices.add(bestMatchIndex);
+    candidates.sort((a, b) => b.score - a.score);
+
+    const topCandidates = candidates.slice(0, 5);
+
+    if (candidates.length > 0 && candidates[0].score >= 30) {
+      const bestCandidate = candidates[0];
+      const matchedLabel = bestCandidate.label;
+      const matchedLabelIndex = shippingLabels.findIndex(
+        l => l.pageNumber === matchedLabel.pageNumber
+      );
+      usedLabelIndices.add(matchedLabelIndex);
+
+      const confidence = getMatchConfidence(
+        bestCandidate.score,
+        !!(slip.customerName && matchedLabel.customerName),
+        !!(slip.postcode && matchedLabel.postcode)
+      );
 
       const existingGroupIndex = groups.findIndex(
         g =>
@@ -379,20 +470,24 @@ export const matchPackingSlipsToLabels = (
           orderNumber: slip.orderNumber,
           packingSlips: [slip],
           shippingLabel: matchedLabel,
+          matchConfidence: confidence,
+          labelCandidates: topCandidates,
         });
       }
 
       console.log(
-        `Matched packing slip page ${slip.pageNumber} (${slip.customerName}, ${slip.postcode}) with label page ${matchedLabel.pageNumber} (score: ${bestMatchScore})`
+        `Matched packing slip page ${slip.pageNumber} (${slip.customerName}, ${slip.postcode}) with label page ${matchedLabel.pageNumber} (score: ${bestCandidate.score}, confidence: ${confidence}) - ${bestCandidate.matchReasons.join(', ')}`
       );
     } else {
       groups.push({
         orderNumber: slip.orderNumber,
         packingSlips: [slip],
         shippingLabel: null,
+        matchConfidence: 'unmatched',
+        labelCandidates: topCandidates,
       });
       console.log(
-        `No match found for packing slip page ${slip.pageNumber} (${slip.customerName}, ${slip.postcode})`
+        `No match found for packing slip page ${slip.pageNumber} (${slip.customerName}, ${slip.postcode}). ${topCandidates.length} candidates available.`
       );
     }
   }
