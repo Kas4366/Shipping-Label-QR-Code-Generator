@@ -9,22 +9,14 @@ export interface ShippingLabel {
   pageNumber: number;
   customerName: string | null;
   postcode: string | null;
+  service: string | null;
 }
 
-export interface LabelCandidate {
-  label: ShippingLabel;
-  score: number;
-  matchReasons: string[];
-}
-
-export type MatchConfidence = 'high' | 'medium' | 'low' | 'unmatched';
 
 export interface PackingSlipGroup {
   orderNumber: string;
   packingSlips: PackingSlip[];
   shippingLabel: ShippingLabel | null;
-  matchConfidence?: MatchConfidence;
-  labelCandidates?: LabelCandidate[];
 }
 
 export interface ProcessedOrder {
@@ -47,15 +39,16 @@ export interface OrphanedPackingSlip {
   postcode: string | null;
 }
 
-export interface UncertainMatch {
-  group: PackingSlipGroup;
-  candidates: LabelCandidate[];
+export interface NonStandardServiceLabel {
+  orderNumber: string;
+  pageNumber: number;
+  service: string;
 }
 
 export interface AnalysisResult {
   groups: PackingSlipGroup[];
   orphanedSlips: OrphanedPackingSlip[];
-  uncertainMatches: UncertainMatch[];
+  nonStandardServiceLabels: NonStandardServiceLabel[];
   totalPackingSlipsDetected: number;
   totalShippingLabelsDetected: number;
 }

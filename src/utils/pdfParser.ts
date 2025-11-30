@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import { PackingSlip, ShippingLabel, PackingSlipGroup, ProcessedOrder, AnalysisResult, LabelCandidate, MatchConfidence } from '../types';
+import { PackingSlip, ShippingLabel, PackingSlipGroup, ProcessedOrder, AnalysisResult, NonStandardServiceLabel } from '../types';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
@@ -50,24 +50,23 @@ export const isPackingSlip = (text: string): boolean => {
 };
 
 export const isShippingLabel = (text: string): boolean => {
-  // If it's a packing slip, it's not a label
   if (text.includes('Packing slip')) {
     return false;
   }
-
-  // Check for Royal Mail shipping label indicators
-  const hasRoyalMail = text.toLowerCase().includes('royal mail');
-  const hasDeliveredBy = text.toLowerCase().includes('delivered by');
-  const has2ndClass = text.toLowerCase().includes('2nd class');
-  const hasPostcode = /\b[A-Z]{1,2}\d{1,2}[A-Z]?\s?\d[A-Z]{2}\b/i.test(text);
-
-  // If it has Royal Mail indicators, it's likely a shipping label
-  if ((hasRoyalMail || hasDeliveredBy || has2ndClass) && hasPostcode) {
-    return true;
-  }
-
-  // Default: if it's not a packing slip, treat as potential label
   return true;
+};
+
+export const extractShippingService = (text: string): string | null => {
+  const lowerText = text.toLowerCase();
+
+  if (lowerText.includes('2nd class')) return '2nd Class';
+  if (lowerText.includes('1st class')) return '1st Class';
+  if (lowerText.includes('tracked 24')) return 'Tracked 24';
+  if (lowerText.includes('tracked 48')) return 'Tracked 48';
+  if (lowerText.includes('special delivery')) return 'Special Delivery';
+  if (lowerText.includes('signed for')) return 'Signed For';
+
+  return null;
 };
 
 export const extractOrderNumber = (text: string): string | null => {
@@ -246,6 +245,7 @@ export const analyzePDF = async (
       orderNumber: string | null;
       customerName: string | null;
       postcode: string | null;
+      service: string | null;
     }> = [];
 
     // First pass: classify all pages
@@ -263,19 +263,19 @@ export const analyzePDF = async (
         const orderNumber = extractOrderNumber(text);
         const customerName = extractCustomerNameFromPackingSlip(text);
         console.log(`Page ${i}: Packing slip detected, order: ${orderNumber}, customer: ${customerName}, postcode: ${postcode}`);
-        allPages.push({ pageNumber: i, isPackingSlip: true, orderNumber, customerName, postcode });
+        allPages.push({ pageNumber: i, isPackingSlip: true, orderNumber, customerName, postcode, service: null });
       } else {
         const customerName = extractCustomerNameFromShippingLabel(text);
-        console.log(`Page ${i}: Shipping label, customer: ${customerName}, postcode: ${postcode}`);
-        allPages.push({ pageNumber: i, isPackingSlip: false, orderNumber: null, customerName, postcode });
+        const service = extractShippingService(text);
+        console.log(`Page ${i}: Shipping label, customer: ${customerName}, postcode: ${postcode}, service: ${service}`);
+        allPages.push({ pageNumber: i, isPackingSlip: false, orderNumber: null, customerName, postcode, service });
       }
     }
 
     const totalPackingSlipsDetected = allPages.filter(page => page.isPackingSlip).length;
     const totalShippingLabelsDetected = allPages.filter(page => !page.isPackingSlip).length;
 
-    // Second pass: match packing slips to labels by customer name and postcode
-    const groups = matchPackingSlipsToLabels(allPages);
+    const groups = sequentialMatchPackingSlipsToLabels(allPages);
 
     console.log('Matched groups:', groups.length);
 
@@ -288,22 +288,24 @@ export const analyzePDF = async (
         postcode: slip.postcode,
       })));
 
-    const uncertainMatches = groups
+    const nonStandardServiceLabels: NonStandardServiceLabel[] = groups
       .filter(group =>
         group.shippingLabel !== null &&
-        (group.matchConfidence === 'low' || group.matchConfidence === 'medium')
+        group.shippingLabel.service !== null &&
+        group.shippingLabel.service !== '2nd Class'
       )
       .map(group => ({
-        group,
-        candidates: group.labelCandidates || [],
+        orderNumber: group.orderNumber,
+        pageNumber: group.shippingLabel!.pageNumber,
+        service: group.shippingLabel!.service!,
       }));
 
-    console.log(`Found ${uncertainMatches.length} uncertain matches that may need review`);
+    console.log(`Found ${orphanedSlips.length} orphaned slips and ${nonStandardServiceLabels.length} non-standard service labels`);
 
     return {
       groups,
       orphanedSlips,
-      uncertainMatches,
+      nonStandardServiceLabels,
       totalPackingSlipsDetected,
       totalShippingLabelsDetected
     };
@@ -313,191 +315,73 @@ export const analyzePDF = async (
   }
 };
 
-const calculateMatchScore = (
-  slip: PackingSlip,
-  label: ShippingLabel
-): { score: number; reasons: string[] } => {
-  let score = 0;
-  const reasons: string[] = [];
-
-  const slipName = slip.customerName;
-  const labelName = label.customerName;
-  const slipPostcode = slip.postcode;
-  const labelPostcode = label.postcode;
-  const pageDistance = Math.abs(label.pageNumber - slip.pageNumber);
-
-  if (slipName && labelName) {
-    if (slipName === labelName) {
-      score += 100;
-      reasons.push('Exact name match');
-
-      if (slipPostcode && labelPostcode && slipPostcode === labelPostcode) {
-        score += 50;
-        reasons.push('Postcode match');
-      }
-    } else {
-      const nameSimilarity = calculateNameSimilarity(slipName, labelName);
-      if (nameSimilarity > 0.7) {
-        score += 60;
-        reasons.push('Similar name');
-      }
-    }
-  }
-
-  if (slipPostcode && labelPostcode && slipPostcode === labelPostcode && score < 100) {
-    score += 80;
-    reasons.push('Postcode match');
-  }
-
-  if (pageDistance === 1) {
-    score += 30;
-    reasons.push('Adjacent pages');
-  } else if (pageDistance === 2) {
-    score += 20;
-    reasons.push('Near pages (distance 2)');
-  } else if (pageDistance <= 5) {
-    score += 10;
-    reasons.push(`Close pages (distance ${pageDistance})`);
-  }
-
-  if (!labelName) {
-    reasons.push('Label has no name extracted');
-  }
-
-  return { score, reasons };
-};
-
-const calculateNameSimilarity = (name1: string, name2: string): number => {
-  const words1 = name1.toLowerCase().split(/\s+/);
-  const words2 = name2.toLowerCase().split(/\s+/);
-
-  let matchCount = 0;
-  for (const word1 of words1) {
-    for (const word2 of words2) {
-      if (word1 === word2 || word1.includes(word2) || word2.includes(word1)) {
-        matchCount++;
-        break;
-      }
-    }
-  }
-
-  return matchCount / Math.max(words1.length, words2.length);
-};
-
-const getMatchConfidence = (score: number, hasName: boolean, hasPostcode: boolean): MatchConfidence => {
-  if (score >= 150) return 'high';
-  if (score >= 100) return 'high';
-  if (score >= 80) return 'medium';
-  if (score >= 30) return 'low';
-  return 'unmatched';
-};
-
-export const matchPackingSlipsToLabels = (
+export const sequentialMatchPackingSlipsToLabels = (
   pages: Array<{
     pageNumber: number;
     isPackingSlip: boolean;
     orderNumber: string | null;
     customerName: string | null;
     postcode: string | null;
+    service: string | null;
   }>
 ): PackingSlipGroup[] => {
-  const packingSlips: PackingSlip[] = pages
-    .filter(page => page.isPackingSlip)
-    .map(page => ({
-      pageNumber: page.pageNumber,
-      orderNumber: page.orderNumber || 'UNKNOWN',
-      customerName: page.customerName,
-      postcode: page.postcode,
-    }));
-
-  const shippingLabels: ShippingLabel[] = pages
-    .filter(page => !page.isPackingSlip)
-    .map(page => ({
-      pageNumber: page.pageNumber,
-      customerName: page.customerName,
-      postcode: page.postcode,
-    }));
-
   const groups: PackingSlipGroup[] = [];
-  const usedLabelIndices = new Set<number>();
+  let i = 0;
 
-  for (const slip of packingSlips) {
-    const candidates: LabelCandidate[] = [];
+  while (i < pages.length) {
+    const page = pages[i];
 
-    for (let i = 0; i < shippingLabels.length; i++) {
-      if (usedLabelIndices.has(i)) continue;
+    if (page.isPackingSlip) {
+      const orderNumber = page.orderNumber || 'UNKNOWN';
+      const packingSlips: PackingSlip[] = [{
+        pageNumber: page.pageNumber,
+        orderNumber,
+        customerName: page.customerName,
+        postcode: page.postcode,
+      }];
 
-      const label = shippingLabels[i];
-      const { score, reasons } = calculateMatchScore(slip, label);
-
-      if (score > 0) {
-        candidates.push({
-          label,
-          score,
-          matchReasons: reasons,
+      let j = i + 1;
+      while (j < pages.length && pages[j].isPackingSlip && pages[j].orderNumber === orderNumber) {
+        packingSlips.push({
+          pageNumber: pages[j].pageNumber,
+          orderNumber: pages[j].orderNumber || 'UNKNOWN',
+          customerName: pages[j].customerName,
+          postcode: pages[j].postcode,
         });
+        j++;
       }
-    }
 
-    candidates.sort((a, b) => b.score - a.score);
+      if (j < pages.length && !pages[j].isPackingSlip) {
+        const labelPage = pages[j];
+        const shippingLabel: ShippingLabel = {
+          pageNumber: labelPage.pageNumber,
+          customerName: labelPage.customerName,
+          postcode: labelPage.postcode,
+          service: labelPage.service,
+        };
 
-    const topCandidates = candidates.slice(0, 5);
+        groups.push({
+          orderNumber,
+          packingSlips,
+          shippingLabel,
+        });
 
-    if (candidates.length > 0 && candidates[0].score >= 30) {
-      const bestCandidate = candidates[0];
-      const matchedLabel = bestCandidate.label;
-      const matchedLabelIndex = shippingLabels.findIndex(
-        l => l.pageNumber === matchedLabel.pageNumber
-      );
-      usedLabelIndices.add(matchedLabelIndex);
-
-      const confidence = getMatchConfidence(
-        bestCandidate.score,
-        !!(slip.customerName && matchedLabel.customerName),
-        !!(slip.postcode && matchedLabel.postcode)
-      );
-
-      const existingGroupIndex = groups.findIndex(
-        g =>
-          g.shippingLabel?.pageNumber === matchedLabel.pageNumber &&
-          g.orderNumber === slip.orderNumber
-      );
-
-      if (existingGroupIndex >= 0) {
-        groups[existingGroupIndex].packingSlips.push(slip);
+        console.log(`Sequential match: Order ${orderNumber} with ${packingSlips.length} packing slip(s) matched to label on page ${labelPage.pageNumber} (service: ${labelPage.service})`);
+        i = j + 1;
       } else {
         groups.push({
-          orderNumber: slip.orderNumber,
-          packingSlips: [slip],
-          shippingLabel: matchedLabel,
-          matchConfidence: confidence,
-          labelCandidates: topCandidates,
+          orderNumber,
+          packingSlips,
+          shippingLabel: null,
         });
+
+        console.log(`Orphaned: Order ${orderNumber} with ${packingSlips.length} packing slip(s) has no shipping label`);
+        i = j;
       }
-
-      console.log(
-        `Matched packing slip page ${slip.pageNumber} (${slip.customerName}, ${slip.postcode}) with label page ${matchedLabel.pageNumber} (score: ${bestCandidate.score}, confidence: ${confidence}) - ${bestCandidate.matchReasons.join(', ')}`
-      );
     } else {
-      groups.push({
-        orderNumber: slip.orderNumber,
-        packingSlips: [slip],
-        shippingLabel: null,
-        matchConfidence: 'unmatched',
-        labelCandidates: topCandidates,
-      });
-      console.log(
-        `No match found for packing slip page ${slip.pageNumber} (${slip.customerName}, ${slip.postcode}). ${topCandidates.length} candidates available.`
-      );
+      console.log(`Unmatched shipping label on page ${page.pageNumber}`);
+      i++;
     }
-  }
-
-  const unusedLabels = shippingLabels.filter((_, i) => !usedLabelIndices.has(i));
-  if (unusedLabels.length > 0) {
-    console.log(`Warning: ${unusedLabels.length} shipping labels were not matched to any packing slips`);
-    unusedLabels.forEach(label => {
-      console.log(`  Unmatched label page ${label.pageNumber} (${label.customerName}, ${label.postcode})`);
-    });
   }
 
   return groups;

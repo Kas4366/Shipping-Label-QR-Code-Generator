@@ -1,10 +1,11 @@
 import React from 'react';
-import { ProcessedOrder, OrphanedPackingSlip } from '../types';
+import { ProcessedOrder, OrphanedPackingSlip, NonStandardServiceLabel } from '../types';
 import { CheckCircle, Package, FileText, AlertTriangle, ScanLine } from 'lucide-react';
 
 interface ProcessingSummaryProps {
   orders: ProcessedOrder[];
   orphanedSlips?: OrphanedPackingSlip[];
+  nonStandardServiceLabels?: NonStandardServiceLabel[];
   totalPackingSlipsDetected: number;
   totalShippingLabelsDetected: number;
 }
@@ -12,6 +13,7 @@ interface ProcessingSummaryProps {
 export const ProcessingSummary: React.FC<ProcessingSummaryProps> = ({
   orders,
   orphanedSlips = [],
+  nonStandardServiceLabels = [],
   totalPackingSlipsDetected,
   totalShippingLabelsDetected
 }) => {
@@ -83,36 +85,74 @@ export const ProcessingSummary: React.FC<ProcessingSummaryProps> = ({
         </div>
       </div>
 
-      {orphanedSlips.length > 0 && (
+      {(orphanedSlips.length > 0 || nonStandardServiceLabels.length > 0) && (
         <div className="border-t pt-4 mb-4">
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-            <div className="flex items-start mb-3">
-              <AlertTriangle className="w-5 h-5 text-amber-600 mr-2 mt-0.5" />
-              <div>
-                <h3 className="font-semibold text-amber-900 mb-1">
-                  Missing Shipping Labels
-                </h3>
-                <p className="text-sm text-amber-800">
-                  {orphanedSlips.length} packing slip{orphanedSlips.length > 1 ? 's' : ''} found without corresponding shipping labels
-                </p>
+          {orphanedSlips.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4">
+              <div className="flex items-start mb-3">
+                <AlertTriangle className="w-5 h-5 text-amber-600 mr-2 mt-0.5" />
+                <div>
+                  <h3 className="font-semibold text-amber-900 mb-1">
+                    Missing Shipping Labels
+                  </h3>
+                  <p className="text-sm text-amber-800">
+                    {orphanedSlips.length} packing slip{orphanedSlips.length > 1 ? 's' : ''} found without corresponding shipping labels
+                  </p>
+                </div>
+              </div>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {orphanedSlips.map((slip, index) => (
+                  <div
+                    key={index}
+                    className="flex items-center justify-between bg-white rounded px-3 py-1.5 text-sm"
+                  >
+                    <span className="font-medium text-amber-900">
+                      Order #{slip.orderNumber}
+                    </span>
+                    <span className="text-xs text-amber-700">
+                      Page {slip.pageNumber}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
-            <div className="space-y-1 max-h-32 overflow-y-auto">
-              {orphanedSlips.map((slip, index) => (
-                <div
-                  key={index}
-                  className="flex items-center justify-between bg-white rounded px-3 py-1.5 text-sm"
-                >
-                  <span className="font-medium text-amber-900">
-                    Order #{slip.orderNumber}
-                  </span>
-                  <span className="text-xs text-amber-700">
-                    Page {slip.pageNumber}
-                  </span>
+          )}
+
+          {nonStandardServiceLabels.length > 0 && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <div className="flex items-start mb-3">
+                <AlertTriangle className="w-5 h-5 text-blue-600 mr-2 mt-0.5" />
+                <div>
+                  <h3 className="font-semibold text-blue-900 mb-1">
+                    Non-Standard Shipping Services
+                  </h3>
+                  <p className="text-sm text-blue-800">
+                    {nonStandardServiceLabels.length} label{nonStandardServiceLabels.length > 1 ? 's' : ''} with service other than "2nd Class"
+                  </p>
                 </div>
-              ))}
+              </div>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {nonStandardServiceLabels.map((label, index) => (
+                  <div
+                    key={index}
+                    className="flex items-center justify-between bg-white rounded px-3 py-1.5 text-sm"
+                  >
+                    <div className="flex flex-col">
+                      <span className="font-medium text-blue-900">
+                        Order #{label.orderNumber}
+                      </span>
+                      <span className="text-xs text-blue-700 font-semibold">
+                        {label.service}
+                      </span>
+                    </div>
+                    <span className="text-xs text-blue-700">
+                      Page {label.pageNumber}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 

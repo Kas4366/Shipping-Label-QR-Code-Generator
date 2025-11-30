@@ -3,8 +3,7 @@ import { FileUpload } from './components/FileUpload';
 import { ProcessingSummary } from './components/ProcessingSummary';
 import { ProgressBar } from './components/ProgressBar';
 import { WarningDialog } from './components/WarningDialog';
-import { MatchReviewDialog } from './components/MatchReviewDialog';
-import { ProcessedOrder, ProcessingStatus, OrphanedPackingSlip, UncertainMatch, PackingSlipGroup, ShippingLabel } from './types';
+import { ProcessedOrder, ProcessingStatus, OrphanedPackingSlip, NonStandardServiceLabel } from './types';
 import { analyzePDF, convertGroupsToOrders } from './utils/pdfParser';
 import { createEnhancedPDF } from './utils/pdfModifier';
 import { downloadPDF } from './utils/fileDownload';
@@ -13,13 +12,11 @@ import { Download, RefreshCw, AlertCircle, CheckCircle } from 'lucide-react';
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [orders, setOrders] = useState<ProcessedOrder[]>([]);
-  const [allGroups, setAllGroups] = useState<PackingSlipGroup[]>([]);
   const [orphanedSlips, setOrphanedSlips] = useState<OrphanedPackingSlip[]>([]);
-  const [uncertainMatches, setUncertainMatches] = useState<UncertainMatch[]>([]);
+  const [nonStandardServiceLabels, setNonStandardServiceLabels] = useState<NonStandardServiceLabel[]>([]);
   const [totalPackingSlipsDetected, setTotalPackingSlipsDetected] = useState(0);
   const [totalShippingLabelsDetected, setTotalShippingLabelsDetected] = useState(0);
   const [showWarningDialog, setShowWarningDialog] = useState(false);
-  const [showReviewDialog, setShowReviewDialog] = useState(false);
   const [userConfirmedWarning, setUserConfirmedWarning] = useState(false);
   const [enhancedPDF, setEnhancedPDF] = useState<Uint8Array | null>(null);
   const [processingStatus, setProcessingStatus] = useState<ProcessingStatus>({
@@ -31,8 +28,8 @@ function App() {
   const handleFileSelect = async (file: File) => {
     setSelectedFile(file);
     setOrders([]);
-    setAllGroups([]);
-    setUncertainMatches([]);
+    setOrphanedSlips([]);
+    setNonStandardServiceLabels([]);
     setEnhancedPDF(null);
     setProcessingStatus({
       isProcessing: true,
@@ -43,9 +40,9 @@ function App() {
 
     try {
       console.log('Starting file analysis for:', file.name);
-      const { groups, orphanedSlips, uncertainMatches, totalPackingSlipsDetected, totalShippingLabelsDetected } = await analyzePDF(file);
+      const { groups, orphanedSlips, nonStandardServiceLabels, totalPackingSlipsDetected, totalShippingLabelsDetected } = await analyzePDF(file);
 
-      console.log('Analysis complete:', { groups, orphanedSlips, uncertainMatches, totalPackingSlipsDetected, totalShippingLabelsDetected });
+      console.log('Analysis complete:', { groups, orphanedSlips, nonStandardServiceLabels, totalPackingSlipsDetected, totalShippingLabelsDetected });
 
       setProcessingStatus({
         isProcessing: true,
@@ -56,10 +53,9 @@ function App() {
       const processedOrders = convertGroupsToOrders(groups);
       console.log('Processed orders:', processedOrders);
 
-      setAllGroups(groups);
       setOrders(processedOrders);
       setOrphanedSlips(orphanedSlips);
-      setUncertainMatches(uncertainMatches);
+      setNonStandardServiceLabels(nonStandardServiceLabels);
       setTotalPackingSlipsDetected(totalPackingSlipsDetected);
       setTotalShippingLabelsDetected(totalShippingLabelsDetected);
       setUserConfirmedWarning(false);
@@ -74,9 +70,8 @@ function App() {
       console.error('Error stack:', error instanceof Error ? error.stack : 'No stack trace');
       setSelectedFile(null);
       setOrders([]);
-      setAllGroups([]);
       setOrphanedSlips([]);
-      setUncertainMatches([]);
+      setNonStandardServiceLabels([]);
       setTotalPackingSlipsDetected(0);
       setTotalShippingLabelsDetected(0);
       setProcessingStatus({
@@ -91,7 +86,7 @@ function App() {
   const handleGeneratePDF = async () => {
     if (!selectedFile || orders.length === 0) return;
 
-    if (orphanedSlips.length > 0 && !userConfirmedWarning) {
+    if ((orphanedSlips.length > 0 || nonStandardServiceLabels.length > 0) && !userConfirmedWarning) {
       setShowWarningDialog(true);
       return;
     }
@@ -140,71 +135,15 @@ function App() {
     }
   };
 
-  const handleReviewMatches = () => {
-    setShowReviewDialog(true);
-  };
-
-  const handleConfirmMatch = (matchIndex: number, selectedLabel: ShippingLabel) => {
-    const updatedGroups = [...allGroups];
-    const matchGroup = uncertainMatches[matchIndex].group;
-    const groupIndex = updatedGroups.findIndex(
-      g => g.orderNumber === matchGroup.orderNumber &&
-           g.packingSlips[0].pageNumber === matchGroup.packingSlips[0].pageNumber
-    );
-
-    if (groupIndex !== -1) {
-      updatedGroups[groupIndex] = {
-        ...updatedGroups[groupIndex],
-        shippingLabel: selectedLabel,
-        matchConfidence: 'high',
-      };
-      setAllGroups(updatedGroups);
-      setOrders(convertGroupsToOrders(updatedGroups));
-    }
-  };
-
-  const handleSkipMatch = (matchIndex: number) => {
-    const updatedGroups = [...allGroups];
-    const matchGroup = uncertainMatches[matchIndex].group;
-    const groupIndex = updatedGroups.findIndex(
-      g => g.orderNumber === matchGroup.orderNumber &&
-           g.packingSlips[0].pageNumber === matchGroup.packingSlips[0].pageNumber
-    );
-
-    if (groupIndex !== -1) {
-      updatedGroups[groupIndex] = {
-        ...updatedGroups[groupIndex],
-        shippingLabel: null,
-        matchConfidence: 'unmatched',
-      };
-      setAllGroups(updatedGroups);
-      setOrders(convertGroupsToOrders(updatedGroups));
-
-      const slip = matchGroup.packingSlips[0];
-      setOrphanedSlips([...orphanedSlips, {
-        pageNumber: slip.pageNumber,
-        orderNumber: matchGroup.orderNumber,
-        customerName: slip.customerName,
-        postcode: slip.postcode,
-      }]);
-    }
-  };
-
-  const handleReviewComplete = () => {
-    setShowReviewDialog(false);
-    setUncertainMatches([]);
-  };
 
   const handleReset = () => {
     setSelectedFile(null);
     setOrders([]);
-    setAllGroups([]);
     setOrphanedSlips([]);
-    setUncertainMatches([]);
+    setNonStandardServiceLabels([]);
     setTotalPackingSlipsDetected(0);
     setTotalShippingLabelsDetected(0);
     setShowWarningDialog(false);
-    setShowReviewDialog(false);
     setUserConfirmedWarning(false);
     setEnhancedPDF(null);
     setProcessingStatus({
@@ -275,48 +214,19 @@ function App() {
             <ProcessingSummary
               orders={orders}
               orphanedSlips={orphanedSlips}
+              nonStandardServiceLabels={nonStandardServiceLabels}
               totalPackingSlipsDetected={totalPackingSlipsDetected}
               totalShippingLabelsDetected={totalShippingLabelsDetected}
             />
-
-            {uncertainMatches.length > 0 && (
-              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6 mb-6">
-                <div className="flex items-start mb-4">
-                  <AlertCircle className="w-5 h-5 text-yellow-600 mr-3 mt-0.5 flex-shrink-0" />
-                  <div className="flex-1">
-                    <h3 className="font-semibold text-yellow-900 mb-1">Uncertain Matches Detected</h3>
-                    <p className="text-yellow-800 mb-3">
-                      {uncertainMatches.length} packing slip{uncertainMatches.length > 1 ? 's' : ''} {uncertainMatches.length > 1 ? 'have' : 'has'} uncertain label matches.
-                      Review them to improve accuracy.
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={handleReviewMatches}
-                  className="flex items-center px-6 py-3 bg-yellow-600 text-white rounded-lg font-semibold hover:bg-yellow-700 transition-colors"
-                >
-                  <CheckCircle className="w-5 h-5 mr-2" />
-                  Review Matches ({uncertainMatches.length})
-                </button>
-              </div>
-            )}
           </>
         )}
 
         {showWarningDialog && (
           <WarningDialog
             orphanedSlips={orphanedSlips}
+            nonStandardServiceLabels={nonStandardServiceLabels}
             onCancel={handleWarningCancel}
             onProceed={handleWarningProceed}
-          />
-        )}
-
-        {showReviewDialog && (
-          <MatchReviewDialog
-            uncertainMatches={uncertainMatches}
-            onConfirm={handleConfirmMatch}
-            onSkip={handleSkipMatch}
-            onComplete={handleReviewComplete}
           />
         )}
 
